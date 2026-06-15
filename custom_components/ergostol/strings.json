@@ -1,0 +1,37 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "confirm": {
+        "description": "Add Ergostol desk {name}?"
+      },
+      "user": {
+        "description": "Select the Ergostol desk to add.",
+        "data": {
+          "address": "Device"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This desk is already configured",
+      "no_devices_found": "No Ergostol desks found. Make sure the desk's Bluetooth adapter is powered and in range of Home Assistant."
+    }
+  },
+  "entity": {
+    "number": {
+      "height": { "name": "Height" }
+    },
+    "sensor": {
+      "current_height": { "name": "Current height" }
+    },
+    "binary_sensor": {
+      "moving": { "name": "Moving" }
+    },
+    "button": {
+      "stop": { "name": "Stop" },
+      "preset_sit": { "name": "Sit preset" },
+      "preset_middle": { "name": "Middle preset" },
+      "preset_stand": { "name": "Stand preset" }
+    }
+  }
+}

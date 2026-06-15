@@ -4,3 +4,4 @@ __pycache__/
 apk/
 *.pcapng
 .DS_Store
+scripts/*.local

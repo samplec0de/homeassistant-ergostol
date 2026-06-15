@@ -1,0 +1,37 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "confirm": {
+        "description": "Добавить стол Ergostol {name}?"
+      },
+      "user": {
+        "description": "Выберите стол Ergostol для добавления.",
+        "data": {
+          "address": "Устройство"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Этот стол уже настроен",
+      "no_devices_found": "Столы Ergostol не найдены. Убедитесь, что Bluetooth-адаптер стола включён и находится в зоне действия Home Assistant."
+    }
+  },
+  "entity": {
+    "number": {
+      "height": { "name": "Высота" }
+    },
+    "sensor": {
+      "current_height": { "name": "Текущая высота" }
+    },
+    "binary_sensor": {
+      "moving": { "name": "Движется" }
+    },
+    "button": {
+      "stop": { "name": "Стоп" },
+      "preset_sit": { "name": "Пресет «сидя»" },
+      "preset_middle": { "name": "Пресет «средний»" },
+      "preset_stand": { "name": "Пресет «стоя»" }
+    }
+  }
+}
