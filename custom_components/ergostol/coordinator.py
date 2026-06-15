@@ -123,6 +123,10 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         if op in (OP_QUERY, OP_STOP):
             self._last_hall = hall
             self._height_event.set()
+            # Reflect pushed / handset-driven height changes immediately. During
+            # our own moves the move loop already publishes, so skip then.
+            if not self._moving and self.data is not None:
+                self._publish(hall, moving=False)
         elif op == OP_INIT:
             self._calib[p1] = hall
 
