@@ -68,7 +68,9 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         self.address = address
         self.entry = entry
         self._client: BleakClientWithServiceCache | None = None
-        self._lock = asyncio.Lock()
+        self._lock = asyncio.Lock()        # serialises high-level operations
+        self._write_lock = asyncio.Lock()  # serialises raw GATT writes
+        self._abort = asyncio.Event()      # set by Stop to interrupt a move
         self._last_hall: int | None = None
         self._height_event = asyncio.Event()
         self._calib: dict[int, int] = {}
@@ -131,8 +133,11 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
             self._calib[p1] = hall
 
     async def _write(self, payload: bytes) -> None:
-        assert self._client is not None
-        await self._client.write_gatt_char(WRITE_UUID, payload, response=False)
+        # Serialised so Stop can write op-9 while a move loop is also writing.
+        async with self._write_lock:
+            if self._client is None:
+                return
+            await self._client.write_gatt_char(WRITE_UUID, payload, response=False)
 
     async def _init_walk(self) -> None:
         """Read the desk's calibration (base hall, model -> g.u, travel range)."""
@@ -195,13 +200,14 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
             return
         direction = OP_UP if cur < target else OP_DOWN
         brake = target - STOP_LEAD_HALL if direction == OP_UP else target + STOP_LEAD_HALL
+        self._abort.clear()
         self._moving = True
         loop = asyncio.get_running_loop()
         deadline = loop.time() + MOVE_TIMEOUT
         last, last_prog = cur, loop.time()
         try:
             await self._write(build(direction))
-            while True:
+            while not self._abort.is_set():
                 await self._write(build(direction))
                 cur = await self._read_height_hall(tries=2)
                 now = loop.time()
@@ -221,14 +227,23 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
                 if now > deadline:
                     break
             await self._brake()
-            # fine approach with short pulses (little coast from standstill)
-            for _ in range(6):
+            # Fine approach: short pulses toward the target. Stop once within
+            # tolerance, or as soon as a pulse crosses the target (direction
+            # flips) — that is the closest a single pulse can land without
+            # hunting back and forth.
+            prev_dir = None
+            for _ in range(10):
+                if self._abort.is_set():
+                    break
                 cur = await self._read_height_hall()
                 if cur is None or abs(cur - target) <= tol:
                     break
                 d = OP_UP if cur < target else OP_DOWN
+                if prev_dir is not None and d != prev_dir:
+                    break
+                prev_dir = d
                 await self._write(build(d))
-                await asyncio.sleep(0.18)
+                await asyncio.sleep(0.13)
                 await self._brake()
         finally:
             self._moving = False
@@ -241,19 +256,31 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         await self._write(build(OP_STOP))
 
     async def async_stop(self) -> None:
-        async with self._lock:
-            if self._client is None or not self._client.is_connected:
-                return
-            await self._brake()
-            self._moving = False
-            cur = await self._read_height_hall()
-            self._publish(cur, moving=False)
+        # Must NOT take self._lock: a move in progress holds it for its whole
+        # duration. Signal the move loop to abort and send op-9 right away
+        # (the write lock keeps it from colliding with the move's writes).
+        self._abort.set()
+        if self._client is not None and self._client.is_connected:
+            for _ in range(2):
+                try:
+                    await self._write(build(OP_STOP))
+                except Exception:  # noqa: BLE001
+                    pass
+                await asyncio.sleep(0.2)
+        if not self._moving:
+            # No move loop running (idle / handset) — refresh state ourselves.
+            try:
+                hall = await self._read_height_hall()
+                self._publish(hall, moving=False)
+            except Exception:  # noqa: BLE001
+                pass
 
     async def async_preset(self, which: str) -> None:
         """Recall a stored preset (the desk drives to it and stops itself)."""
         op = PRESET_OPS[which]
         async with self._lock:
             await self._ensure_connected()
+            self._abort.clear()
             self._moving = True
             try:
                 await self._write(build(op))
@@ -261,7 +288,7 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
                 deadline = loop.time() + MOVE_TIMEOUT
                 last = await self._read_height_hall()
                 last_prog = loop.time()
-                while loop.time() < deadline:
+                while loop.time() < deadline and not self._abort.is_set():
                     await asyncio.sleep(0.4)
                     cur = await self._read_height_hall(tries=2)
                     if cur is None:
