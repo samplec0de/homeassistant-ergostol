@@ -16,11 +16,13 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data
-    entities: list[ButtonEntity] = [ErgostolStopButton(coordinator)]
-    entities += [
-        ErgostolPresetButton(coordinator, which) for which in ("sit", "middle", "stand")
-    ]
-    async_add_entities(entities)
+    async_add_entities(
+        [
+            ErgostolStopButton(coordinator),
+            ErgostolPresetButton(coordinator, "sit"),
+            ErgostolPresetButton(coordinator, "stand"),
+        ]
+    )
 
 
 class ErgostolStopButton(ErgostolEntity, ButtonEntity):
@@ -37,7 +39,7 @@ class ErgostolStopButton(ErgostolEntity, ButtonEntity):
 
 
 class ErgostolPresetButton(ErgostolEntity, ButtonEntity):
-    """Recall a stored preset (sit / middle / stand)."""
+    """Drive to the configured sit / stand height (set in the integration options)."""
 
     def __init__(self, coordinator: ErgostolCoordinator, which: str) -> None:
         super().__init__(coordinator)
@@ -46,4 +48,9 @@ class ErgostolPresetButton(ErgostolEntity, ButtonEntity):
         self._attr_unique_id = f"{coordinator.address}_preset_{which}"
 
     async def async_press(self) -> None:
-        await self.coordinator.async_preset(self._which)
+        height = (
+            self.coordinator.sit_height
+            if self._which == "sit"
+            else self.coordinator.stand_height
+        )
+        await self.coordinator.async_set_height(height)

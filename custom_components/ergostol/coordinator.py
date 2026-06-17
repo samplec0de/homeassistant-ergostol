@@ -19,6 +19,10 @@ from homeassistant.util import dt as dt_util
 from .const import (
     CONF_QUIET_END,
     CONF_QUIET_START,
+    CONF_SIT_HEIGHT,
+    CONF_STAND_HEIGHT,
+    DEFAULT_SIT_HEIGHT,
+    DEFAULT_STAND_HEIGHT,
     DOMAIN,
     IDLE_POLL_INTERVAL,
     MOVE_TIMEOUT,
@@ -110,6 +114,14 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
     @property
     def max_cm(self) -> float:
         return round(self.hall_to_cm(self._max_run), 1)
+
+    @property
+    def sit_height(self) -> float:
+        return float(self.entry.options.get(CONF_SIT_HEIGHT, DEFAULT_SIT_HEIGHT))
+
+    @property
+    def stand_height(self) -> float:
+        return float(self.entry.options.get(CONF_STAND_HEIGHT, DEFAULT_STAND_HEIGHT))
 
     # ---- connection ----
     def _on_disconnect(self, _client) -> None:

@@ -11,6 +11,12 @@ CONF_ADDRESS = "address"
 CONF_QUIET_START = "quiet_start"
 CONF_QUIET_END = "quiet_end"
 
+# Options: sit/stand preset heights (cm). The preset buttons drive to these.
+CONF_SIT_HEIGHT = "sit_height"
+CONF_STAND_HEIGHT = "stand_height"
+DEFAULT_SIT_HEIGHT = 73.0
+DEFAULT_STAND_HEIGHT = 115.0
+
 # Coordinator behaviour
 IDLE_POLL_INTERVAL = 5.0      # seconds between height polls while idle
                               # (also reflects handset-driven changes quickly)

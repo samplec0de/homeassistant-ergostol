@@ -18,7 +18,16 @@ from homeassistant.config_entries import (
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
-from .const import CONF_ADDRESS, CONF_QUIET_END, CONF_QUIET_START, DOMAIN
+from .const import (
+    CONF_ADDRESS,
+    CONF_QUIET_END,
+    CONF_QUIET_START,
+    CONF_SIT_HEIGHT,
+    CONF_STAND_HEIGHT,
+    DEFAULT_SIT_HEIGHT,
+    DEFAULT_STAND_HEIGHT,
+    DOMAIN,
+)
 from .protocol import SERVICE_UUID
 
 
@@ -106,8 +115,22 @@ class ErgostolOptionsFlow(OptionsFlow):
             return self.async_create_entry(title="", data=data)
 
         opts = self.config_entry.options
+        height = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=60, max=132, step=0.5, unit_of_measurement="cm",
+                mode=selector.NumberSelectorMode.BOX,
+            )
+        )
         schema = vol.Schema(
             {
+                vol.Optional(
+                    CONF_SIT_HEIGHT,
+                    default=opts.get(CONF_SIT_HEIGHT, DEFAULT_SIT_HEIGHT),
+                ): height,
+                vol.Optional(
+                    CONF_STAND_HEIGHT,
+                    default=opts.get(CONF_STAND_HEIGHT, DEFAULT_STAND_HEIGHT),
+                ): height,
                 vol.Optional(
                     CONF_QUIET_START,
                     description={"suggested_value": opts.get(CONF_QUIET_START)},
