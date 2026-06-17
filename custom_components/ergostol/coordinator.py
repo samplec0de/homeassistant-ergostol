@@ -82,6 +82,7 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         self._max_run = DEFAULT_MAX_RUN
         self._moving = False
         self._height_cm: float | None = None
+        self._target_hall: int | None = None  # last commanded target (for snap)
 
     # ---- conversions ----
     def hall_to_cm(self, hall: int) -> float:
@@ -89,6 +90,18 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
 
     def cm_to_hall(self, cm: float) -> int:
         return round(cm * self._gu - self._base)
+
+    def _display_cm(self, hall: int) -> float:
+        # The desk positions to ~0.1 cm (motor start/stop granularity). When it
+        # settles within ~0.15 cm of the height we commanded, report exactly the
+        # commanded value so "set 72 -> shows 72.0". Handset moves (no target
+        # nearby) show the real height.
+        if (
+            self._target_hall is not None
+            and abs(hall - self._target_hall) <= round(0.15 * self._gu)
+        ):
+            return round(self.hall_to_cm(self._target_hall), 1)
+        return round(self.hall_to_cm(hall), 1)
 
     @property
     def min_cm(self) -> float:
@@ -200,7 +213,7 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
             await self._ensure_connected()
             hall = await self._read_height_hall()
             if hall is not None:
-                self._height_cm = round(self.hall_to_cm(hall), 1)
+                self._height_cm = self._display_cm(hall)
         return ErgostolData(
             height_cm=self._height_cm, moving=self._moving, available=True
         )
@@ -220,6 +233,7 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
 
     async def _move_to(self, cm: float) -> None:
         target = max(0, min(self._max_run, self.cm_to_hall(cm)))
+        self._target_hall = target  # snap the displayed height to this value
         tol = max(2, round(TOLERANCE_CM * self._gu))
         cur = await self._read_height_hall()
         if cur is None:
