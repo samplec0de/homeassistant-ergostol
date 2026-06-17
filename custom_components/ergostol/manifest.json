@@ -7,10 +7,10 @@
   "codeowners": ["@samplec0de"],
   "config_flow": true,
   "dependencies": ["bluetooth_adapters"],
-  "documentation": "https://github.com/samplec0de/ergostol",
+  "documentation": "https://github.com/samplec0de/homeassistant-ergostol",
   "integration_type": "device",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/samplec0de/ergostol/issues",
+  "issue_tracker": "https://github.com/samplec0de/homeassistant-ergostol/issues",
   "requirements": ["bleak-retry-connector>=3.6.0"],
   "version": "1.2.0"
 }

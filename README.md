@@ -1,7 +1,7 @@
 # Ergostol Desk — интеграция для Home Assistant
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
-[![Validate](https://github.com/samplec0de/ergostol/actions/workflows/validate.yml/badge.svg)](https://github.com/samplec0de/ergostol/actions/workflows/validate.yml)
+[![Validate](https://github.com/samplec0de/homeassistant-ergostol/actions/workflows/validate.yml/badge.svg)](https://github.com/samplec0de/homeassistant-ergostol/actions/workflows/validate.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Управление столом с регулировкой высоты **Ergostol** (BLE-адаптер PairLink,
@@ -33,12 +33,12 @@
 ### Через HACS (рекомендуется)
 
 1. HACS → меню (⋮ в правом верхнем углу) → **Custom repositories**.
-2. Добавьте репозиторий `https://github.com/samplec0de/ergostol`, категория
+2. Добавьте репозиторий `https://github.com/samplec0de/homeassistant-ergostol`, категория
    **Integration**.
 
    Или нажмите кнопку (откроется ваш Home Assistant):
 
-   [![Добавить в HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=samplec0de&repository=ergostol&category=integration)
+   [![Добавить в HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=samplec0de&repository=homeassistant-ergostol&category=integration)
 3. Найдите **Ergostol Desk** в списке HACS, нажмите **Download**.
 4. Перезапустите Home Assistant.
 
