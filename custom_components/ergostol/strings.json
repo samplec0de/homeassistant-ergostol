@@ -17,6 +17,18 @@
       "no_devices_found": "No Ergostol desks found. Make sure the desk's Bluetooth adapter is powered and in range of Home Assistant."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Quiet hours",
+        "description": "Pause background height polling during this daily window so the desk's LED panel stays dark (e.g. overnight). Explicit moves still work. Leave both empty to poll around the clock.",
+        "data": {
+          "quiet_start": "Quiet hours start",
+          "quiet_end": "Quiet hours end"
+        }
+      }
+    }
+  },
   "entity": {
     "number": {
       "height": { "name": "Height" }

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import time as dt_time, timedelta
 
 from bleak.backends.device import BLEDevice
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
@@ -14,8 +14,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_QUIET_END,
+    CONF_QUIET_START,
     DOMAIN,
     IDLE_POLL_INTERVAL,
     MOVE_TIMEOUT,
@@ -166,8 +169,33 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
                 continue
         return None
 
+    # ---- quiet hours ----
+    def _in_quiet_hours(self) -> bool:
+        qs = self.entry.options.get(CONF_QUIET_START)
+        qe = self.entry.options.get(CONF_QUIET_END)
+        if not qs or not qe:
+            return False
+        try:
+            sh, sm = (int(x) for x in qs.split(":")[:2])
+            eh, em = (int(x) for x in qe.split(":")[:2])
+        except ValueError:
+            return False
+        start, end = dt_time(sh, sm), dt_time(eh, em)
+        if start == end:
+            return False
+        now = dt_util.now().time()
+        if start < end:
+            return start <= now < end
+        return now >= start or now < end  # window wraps past midnight
+
     # ---- coordinator poll ----
     async def _async_update_data(self) -> ErgostolData:
+        # During quiet hours skip the height query so the desk's LED panel stays
+        # dark. Explicit moves (set height / presets / stop) still work.
+        if self._in_quiet_hours():
+            return ErgostolData(
+                height_cm=self._height_cm, moving=self._moving, available=True
+            )
         async with self._lock:
             await self._ensure_connected()
             hall = await self._read_height_hall()

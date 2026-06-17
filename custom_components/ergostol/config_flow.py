@@ -9,9 +9,16 @@ from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
+from homeassistant.core import callback
+from homeassistant.helpers import selector
 
-from .const import CONF_ADDRESS, DOMAIN
+from .const import CONF_ADDRESS, CONF_QUIET_END, CONF_QUIET_START, DOMAIN
 from .protocol import SERVICE_UUID
 
 
@@ -23,6 +30,11 @@ class ErgostolConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._discovery: BluetoothServiceInfoBleak | None = None
         self._discovered: dict[str, str] = {}
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        return ErgostolOptionsFlow()
 
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfoBleak
@@ -80,3 +92,30 @@ class ErgostolConfigFlow(ConfigFlow, domain=DOMAIN):
                 {vol.Required(CONF_ADDRESS): vol.In(self._discovered)}
             ),
         )
+
+
+class ErgostolOptionsFlow(OptionsFlow):
+    """Quiet-hours options: pause background polling in a daily time window."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            # Empty fields clear the window (polling always on).
+            data = {k: v for k, v in user_input.items() if v}
+            return self.async_create_entry(title="", data=data)
+
+        opts = self.config_entry.options
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_QUIET_START,
+                    description={"suggested_value": opts.get(CONF_QUIET_START)},
+                ): selector.TimeSelector(),
+                vol.Optional(
+                    CONF_QUIET_END,
+                    description={"suggested_value": opts.get(CONF_QUIET_END)},
+                ): selector.TimeSelector(),
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)
