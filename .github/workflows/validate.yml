@@ -17,6 +17,9 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
+          # "brands" is only required for the default HACS store; custom-repository
+          # installs work without it. Add brand assets + a hacs/default PR to list it.
+          ignore: brands
 
   hassfest:
     name: hassfest
