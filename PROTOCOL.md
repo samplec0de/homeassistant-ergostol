@@ -1,40 +1,43 @@
-# Ergostol BLE protocol (reverse-engineered)
+# BLE-протокол Ergostol (реконструкция)
 
-App: `com.pairlink.ergostol` (Ergostol, SingApp), RuStore. Native Java, lib type
-`LIB_DIRECT_DING`. The desk's USB BLE adapter (PairLink module) is the peripheral.
+Приложение: `com.pairlink.ergostol` (Ergostol, SingApp), RuStore. Нативная Java,
+тип библиотеки `LIB_DIRECT_DING`. Периферийное устройство — USB BLE-адаптер
+стола (модуль PairLink).
 
-## BLE transport
+## BLE-транспорт
 
-| Role   | Characteristic UUID                      |
-|--------|------------------------------------------|
-| Write  | `0000ff01-0000-1000-8000-00805f9b34fb`   |
-| Notify | `0000ff02-0000-1000-8000-00805f9b34fb`   |
+| Роль        | UUID характеристики                      |
+|-------------|------------------------------------------|
+| Запись      | `0000ff01-0000-1000-8000-00805f9b34fb`   |
+| Уведомления | `0000ff02-0000-1000-8000-00805f9b34fb`   |
 
-- Enable notifications on `ff02` (standard CCCD `00002902`, NOTIFY).
-- Commands are written to `ff01`. No password / pairing handshake is sent on connect.
-- No app-level auth; the desk accepts commands immediately after connect.
+- Включите уведомления на `ff02` (стандартный CCCD `00002902`, NOTIFY).
+- Команды пишутся в `ff01`. При подключении не передаётся ни пароль, ни pairing.
+- Авторизации на уровне приложения нет — стол принимает команды сразу после
+  подключения.
 
-## Command frame (what goes on the wire = 6 bytes)
+## Кадр команды (на проводе = 6 байт)
 
 ```
 [ op, p1, dHi, dLo, crcLo, crcHi ]
 ```
 
-- `op`  — opcode (see table)
-- `p1`  — sub-parameter (default `0x01`)
-- `dHi`,`dLo` — 16-bit data (big-endian), usually `0x00 0x00` for movement
-- `crcLo,crcHi` — CRC-16, little-endian on the wire
+- `op`  — код операции (см. таблицу)
+- `p1`  — субпараметр (по умолчанию `0x01`)
+- `dHi`,`dLo` — 16-битные данные (big-endian), обычно `0x00 0x00` для движения
+- `crcLo,crcHi` — CRC-16, на проводе в порядке little-endian
 
 ### CRC-16
 
-CRC is computed over an **8-byte buffer with a constant 4-byte header that is NOT
-transmitted** (the firmware prepends it itself):
+CRC считается по **8-байтовому буферу с постоянным 4-байтовым заголовком,
+который НЕ передаётся** (прошивка добавляет его сама):
 
 ```
 crc_input = [0x04, 0xFC, 0x42, 0x06, op, p1, dHi, dLo]
 ```
 
-Nibble-table CRC-16 (init `0xFFFF`, reflected, poly 0x8408 family):
+CRC-16 по nibble-таблице (инициализация `0xFFFF`, reflected, семейство
+полинома 0x8408):
 
 ```python
 TABLE = [0,52225,55297,5120,61441,15360,10240,58369,
@@ -47,77 +50,79 @@ def crc16(buf):
     return crc
 ```
 
-Validated: `crc16([04 FC 42 06 50 01 00 00]) = 0x15BA`, matching the hard-coded
-command `{80,1,0,0,-70,21}` in `MainActivity` (op `0x50`).
+Проверено: `crc16([04 FC 42 06 50 01 00 00]) = 0x15BA`, что совпадает с
+жёстко прописанной командой `{80,1,0,0,-70,21}` в `MainActivity` (op `0x50`).
 
-## Opcodes (op)
+## Коды операций (op)
 
-| op  | meaning                              | notes |
-|-----|--------------------------------------|-------|
-| 1   | **move DOWN** (hold)                 | `BUTTON_DOWN`; sent once on press, STOP on release |
-| 2   | **move UP** (hold)                   | `BUTTON_UP` |
-| 3   | recall **STAND** preset (auto-move)  | desk drives to stored standing pos & stops itself |
-| 4   | recall **MIDDLE** preset (auto-move) | |
-| 5   | recall **SIT** preset (auto-move)    | |
-| 6   | config / save (`p1` selects)         | p1=1/2/3 save stand/middle/sit (= current height); p1=4 cm/inch; p1=5/6/7 base/min/max calibration. dHi,dLo = target hall from field `l` |
-| 7   | init / query sequence (`p1`=index)   | desk replies with calibration values; app walks p1=1..8 |
-| 8   | **query current height**             | desk replies (and streams while moving) |
-| 9   | **STOP**                             | |
-| 11  | handset (physical remote) handshake  | |
-| 12  | reminder / hot state                 | |
+| op  | значение                                  | примечания |
+|-----|-------------------------------------------|------------|
+| 1   | **движение ВНИЗ** (удержание)             | `BUTTON_DOWN`; отправляется один раз при нажатии, STOP при отпускании |
+| 2   | **движение ВВЕРХ** (удержание)            | `BUTTON_UP` |
+| 3   | вызов пресета **STAND** (авто-движение)   | стол сам едет в сохранённую позицию «стоя» и останавливается |
+| 4   | вызов пресета **MIDDLE** (авто-движение)  | |
+| 5   | вызов пресета **SIT** (авто-движение)     | |
+| 6   | конфигурация / сохранение (`p1` выбирает) | p1=1/2/3 сохранить stand/middle/sit (= текущая высота); p1=4 см/дюймы; p1=5/6/7 калибровка base/min/max. dHi,dLo = целевой hall из поля `l` |
+| 7   | init / запрос (`p1`=индекс)               | стол отвечает калибровочными значениями; приложение обходит p1=1..8 |
+| 8   | **запрос текущей высоты**                 | стол отвечает (и стримит во время движения) |
+| 9   | **СТОП**                                  | |
+| 11  | рукопожатие пульта (физического)          | |
+| 12  | напоминание / hot state                   | |
 
-Movement model: send `UP`/`DOWN` once → desk moves continuously and streams height
-notifications → send `STOP` to halt. Presets (3/4/5) auto-stop at the stored target.
+Модель движения: отправить `UP`/`DOWN` один раз → стол едет непрерывно и
+стримит уведомления о высоте → отправить `STOP` для остановки. Пресеты (3/4/5)
+автоматически останавливаются на сохранённой цели.
 
-## Notification frame (from `ff02`)
+## Кадр уведомления (из `ff02`)
 
 ```
 [ opEcho, p1, hallHi, hallLo, ... ]
 ```
 
-- `hall = (hallHi << 8) | hallLo`  (unsigned, big-endian)
-- During movement / on query the desk streams `op=8` packets; `op=9` confirms stop.
-- The streamed hall is **relative to base**. Displayed absolute height adds the base:
-  `abs_cm = (run_hall + base_hall) / 29.333334`
+- `hall = (hallHi << 8) | hallLo`  (без знака, big-endian)
+- Во время движения / по запросу стол стримит пакеты `op=8`; `op=9` подтверждает
+  остановку.
+- Стримящийся hall **относителен базе**. Отображаемая абсолютная высота добавляет
+  базу: `abs_cm = (run_hall + base_hall) / g.u`
 
-## Height ↔ hall conversion (EXACT, from the app)
+## Пересчёт высота ↔ hall (ТОЧНЫЙ, из приложения)
 
-op-8 returns the motor **run hall** (`0` at the lowest position). The app
-(`utils/c.java` `b(int)` + `setDeskHeight`) computes the displayed centimetres as:
+op-8 возвращает **run hall** мотора (`0` в самой нижней позиции). Приложение
+(`utils/c.java` `b(int)` + `setDeskHeight`) вычисляет отображаемые сантиметры так:
 
 ```
 real_cm  = (run_hall + base_hall) / g.u
 run_hall = round(real_cm * g.u - base_hall)
 ```
 
-- `base_hall` = op-7 walk param **5** (here 2816).
-- `g.u` is selected by the **desk model index = op-7 walk param 9** (= MCU version,
-  byte 3 of that reply). Model→g.u table:
+- `base_hall` = параметр **5** обхода op-7 (здесь 2816).
+- `g.u` выбирается по **индексу модели стола = параметр 9 обхода op-7** (= версия
+  MCU, байт 3 этого ответа). Таблица модель→g.u:
   `1,2→29.333334 · 3→11.0 · 4→44.0 · 5→26.0 · 6→58.666668 · 7→29.8 · 8→26.0 ·
   9→27.5 · 10→44.0 · 11→22.0`.
-- This desk: model **4** → `g.u = 44.0`. Verified to 0.1 cm against the handset
-  (e.g. hall 1515 → (1515+2816)/44 = 98.4 cm).
+- Этот стол: модель **4** → `g.u = 44.0`. Проверено с точностью 0.1 см по штатному
+  пульту (например, hall 1515 → (1515+2816)/44 = 98.4 см).
 
-op-7 walk replies (value echoed in `hallHi,hallLo`):
+Ответы обхода op-7 (значение в `hallHi,hallLo`):
 
-| p1 | value                          |
-|----|--------------------------------|
-| 5  | base_hall                      |
-| 6  | min_hall (absolute = base)     |
-| 7  | max_hall (absolute)            |
-| 8  | current run_hall               |
-| 9  | **model index / MCU version**  |
+| p1 | значение                          |
+|----|-----------------------------------|
+| 5  | base_hall                         |
+| 6  | min_hall (абсолютный = база)      |
+| 7  | max_hall (абсолютный)             |
+| 8  | текущий run_hall                  |
+| 9  | **индекс модели / версия MCU**    |
 
-Travel range in run hall: `0 .. (max_hall - base_hall)`. NB: op-8 run_hall is
-**relative to base**; `min_hall`/`max_hall` from the walk are absolute (add base).
+Диапазон хода в run hall: `0 .. (max_hall - base_hall)`. NB: run_hall из op-8
+**относителен базе**; `min_hall`/`max_hall` из обхода — абсолютные (добавьте базу).
 
-## Setting an arbitrary height (no native "go to X" command)
+## Установка произвольной высоты (нативной команды «поехать на X» нет)
 
-The firmware exposes only 3 presets + manual up/down. To reach an arbitrary height,
-run a closed loop:
+Прошивка предоставляет только 3 пресета + ручное вверх/вниз. Чтобы попасть на
+произвольную высоту, выполняется замкнутый контур:
 
-1. `QUERY` (op 8) → current relative hall.
-2. `target_run_hall = round(cm * 29.333334) - base_hall`, clamped to [min,max].
-3. If current < target → `UP` (op 2); if current > target → `DOWN` (op 1).
-4. Watch notifications; when `|current - target| <= tolerance` → `STOP` (op 9).
-5. Always STOP on exit / timeout / overshoot.
+1. `QUERY` (op 8) → текущий относительный hall.
+2. `target_run_hall = round(cm * g.u) - base_hall`, ограничить диапазоном [min,max].
+3. Если текущий < цели → `UP` (op 2); если текущий > цели → `DOWN` (op 1).
+4. Следить за уведомлениями; когда `|текущий - цель| <= допуск` → `STOP` (op 9).
+5. Всегда отправлять STOP при выходе / таймауте / перелёте.

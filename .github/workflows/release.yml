@@ -1,0 +1,25 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Attach integration zip
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build integration zip
+        run: |
+          cd custom_components/ergostol
+          zip -r "${GITHUB_WORKSPACE}/ergostol.zip" .
+      - name: Attach zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ergostol.zip

@@ -1,14 +1,16 @@
 {
   "domain": "ergostol",
   "name": "Ergostol Desk",
-  "codeowners": ["@andrewmosk"],
-  "config_flow": true,
-  "dependencies": ["bluetooth_adapters"],
-  "documentation": "https://github.com/andrewmosk/ergostol",
-  "iot_class": "local_polling",
   "bluetooth": [
     { "service_uuid": "0000ff12-0000-1000-8000-00805f9b34fb" }
   ],
+  "codeowners": ["@samplec0de"],
+  "config_flow": true,
+  "dependencies": ["bluetooth_adapters"],
+  "documentation": "https://github.com/samplec0de/ergostol",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/samplec0de/ergostol/issues",
   "requirements": ["bleak-retry-connector>=3.6.0"],
   "version": "1.2.0"
 }

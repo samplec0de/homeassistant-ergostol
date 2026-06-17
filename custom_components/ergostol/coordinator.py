@@ -1,10 +1,12 @@
 """BLE connection + height control for an Ergostol desk."""
+
 from __future__ import annotations
 
 import asyncio
-import logging
+import contextlib
 from dataclasses import dataclass
 from datetime import time as dt_time, timedelta
+import logging
 
 from bleak.backends.device import BLEDevice
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
@@ -75,9 +77,9 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         self.address = address
         self.entry = entry
         self._client: BleakClientWithServiceCache | None = None
-        self._lock = asyncio.Lock()        # serialises high-level operations
+        self._lock = asyncio.Lock()  # serialises high-level operations
         self._write_lock = asyncio.Lock()  # serialises raw GATT writes
-        self._abort = asyncio.Event()      # set by Stop to interrupt a move
+        self._abort = asyncio.Event()  # set by Stop to interrupt a move
         self._last_hall: int | None = None
         self._height_event = asyncio.Event()
         self._calib: dict[int, int] = {}
@@ -100,9 +102,8 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         # settles within ~0.15 cm of the height we commanded, report exactly the
         # commanded value so "set 72 -> shows 72.0". Handset moves (no target
         # nearby) show the real height.
-        if (
-            self._target_hall is not None
-            and abs(hall - self._target_hall) <= round(0.15 * self._gu)
+        if self._target_hall is not None and abs(hall - self._target_hall) <= round(
+            0.15 * self._gu
         ):
             return round(self.hall_to_cm(self._target_hall), 1)
         return round(self.hall_to_cm(hall), 1)
@@ -180,7 +181,11 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         self._max_run = (max_abs - self._base) if max_abs else DEFAULT_MAX_RUN
         _LOGGER.debug(
             "Ergostol %s calibrated: base=%s g.u=%s range=%s..%s cm",
-            self.address, self._base, self._gu, self.min_cm, self.max_cm,
+            self.address,
+            self._base,
+            self._gu,
+            self.min_cm,
+            self.max_cm,
         )
 
     async def _read_height_hall(self, tries: int = 4) -> int | None:
@@ -190,7 +195,7 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
             try:
                 await asyncio.wait_for(self._height_event.wait(), 0.5)
                 return self._last_hall
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
         return None
 
@@ -253,7 +258,9 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         if abs(cur - target) <= tol:
             return
         direction = OP_UP if cur < target else OP_DOWN
-        brake = target - STOP_LEAD_HALL if direction == OP_UP else target + STOP_LEAD_HALL
+        brake = (
+            target - STOP_LEAD_HALL if direction == OP_UP else target + STOP_LEAD_HALL
+        )
         self._abort.clear()
         self._moving = True
         loop = asyncio.get_running_loop()
@@ -316,17 +323,15 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         self._abort.set()
         if self._client is not None and self._client.is_connected:
             for _ in range(2):
-                try:
+                with contextlib.suppress(Exception):
                     await self._write(build(OP_STOP))
-                except Exception:  # noqa: BLE001
-                    pass
                 await asyncio.sleep(0.2)
         if not self._moving:
             # No move loop running (idle / handset) — refresh state ourselves.
             try:
                 hall = await self._read_height_hall()
                 self._publish(hall, moving=False)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
     async def async_preset(self, which: str) -> None:
@@ -361,8 +366,6 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
     async def async_shutdown(self) -> None:
         await super().async_shutdown()
         if self._client is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._client.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
             self._client = None

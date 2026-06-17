@@ -44,7 +44,6 @@
     "button": {
       "stop": { "name": "Stop" },
       "preset_sit": { "name": "Sit preset" },
-      "preset_middle": { "name": "Middle preset" },
       "preset_stand": { "name": "Stand preset" }
     }
   }

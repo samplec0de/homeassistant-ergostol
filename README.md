@@ -1,40 +1,84 @@
-# Ergostol Desk — Home Assistant integration
+# Ergostol Desk — интеграция для Home Assistant
 
-Control an **Ergostol** height-adjustable desk (PairLink BLE adapter, app
-`com.pairlink.ergostol`) from Home Assistant over Bluetooth.
+[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![Validate](https://github.com/samplec0de/ergostol/actions/workflows/validate.yml/badge.svg)](https://github.com/samplec0de/ergostol/actions/workflows/validate.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-The desk firmware only exposes presets + manual up/down — there is no native
-"go to X cm" command — so this integration drives the desk with a closed loop:
-it polls the height sensor while moving and brakes early to land on the target.
+Управление столом с регулировкой высоты **Ergostol** (BLE-адаптер PairLink,
+приложение `com.pairlink.ergostol`) из Home Assistant по Bluetooth.
 
-## Entities
+Прошивка стола умеет только пресеты и ручное движение вверх/вниз — команды
+«поехать на X см» в ней нет. Поэтому интеграция ведёт стол по замкнутому
+контуру: опрашивает датчик высоты во время движения и тормозит заранее, чтобы
+точно встать на цель (точность ~0.1 см, как у штатного пульта).
 
-| Entity | Type | Purpose |
-|--------|------|---------|
-| Height | `number` (cm) | Set an arbitrary target height; also shows current |
-| Current height | `sensor` (cm) | Read-only, graphable |
-| Moving | `binary_sensor` | On while the desk is in motion |
-| Stop | `button` | Halt motion |
-| Sit / Middle / Stand preset | `button` | Recall a stored preset |
+## Сущности
 
-Height in cm matches the desk's own handset display. The conversion is read
-straight from the desk during setup (`real_cm = (run_hall + base) / g.u`, with
-`base` and the model-specific `g.u` taken from the init handshake), so it
-auto-calibrates for any Ergostol model.
+| Сущность | Тип | Назначение |
+|----------|-----|------------|
+| Высота | `number` (см) | Задать произвольную целевую высоту; показывает текущую |
+| Текущая высота | `sensor` (см) | Только чтение, строится в график |
+| Движется | `binary_sensor` | Включён, пока стол в движении |
+| Стоп | `button` | Остановить движение |
+| Пресет «сидя» / «стоя» | `button` | Поехать на заданную в настройках высоту |
 
-## Install
+Высота в сантиметрах совпадает с показаниями штатного пульта стола. Коэффициент
+пересчёта считывается прямо со стола при настройке
+(`real_cm = (run_hall + base) / g.u`, где `base` и зависящий от модели `g.u`
+берутся из стартового рукопожатия), поэтому интеграция автоматически
+калибруется под любую модель Ergostol.
 
-1. Copy `custom_components/ergostol/` into your HA `config/custom_components/`.
-2. Make sure a Bluetooth adapter reachable by HA is in range of the desk.
-3. Restart Home Assistant.
-4. **Settings → Devices & Services** → the desk is auto-discovered (service
-   `0xff12`); or **Add Integration → Ergostol Desk** and pick it from the list.
+## Установка
 
-## Layout
+### Через HACS (рекомендуется)
 
-- `custom_components/ergostol/` — the integration.
-- `PROTOCOL.md` — reverse-engineered BLE protocol (validated against a capture).
-- `ergostol.py` — standalone CLI controller (bleak) for testing from a laptop.
+1. HACS → меню (⋮ в правом верхнем углу) → **Custom repositories**.
+2. Добавьте репозиторий `https://github.com/samplec0de/ergostol`, категория
+   **Integration**.
 
-See `PROTOCOL.md` for the wire protocol and `ergostol.py` for a reference
-implementation of the height closed loop.
+   Или нажмите кнопку (откроется ваш Home Assistant):
+
+   [![Добавить в HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=samplec0de&repository=ergostol&category=integration)
+3. Найдите **Ergostol Desk** в списке HACS, нажмите **Download**.
+4. Перезапустите Home Assistant.
+
+### Вручную
+
+1. Скопируйте папку `custom_components/ergostol/` в каталог
+   `config/custom_components/` вашего Home Assistant.
+2. Перезапустите Home Assistant.
+
+## Подключение
+
+1. Убедитесь, что Bluetooth-адаптер, доступный Home Assistant, находится в зоне
+   действия стола.
+2. **Настройки → Устройства и службы**: стол определяется автоматически (сервис
+   `0xff12`). Либо **Добавить интеграцию → Ergostol Desk** и выберите стол из
+   списка.
+
+## Настройки (Configure)
+
+В настройках интеграции (**Настроить**) доступны:
+
+- **Высота пресета «сидя» / «стоя» (см)** — куда едут одноимённые кнопки.
+- **Тихие часы** (начало/конец, `ЧЧ:ММ`, можно через полночь) — в этом интервале
+  фоновый опрос высоты приостанавливается, чтобы не зажигать LED-экран стола
+  (например, ночью). Явные команды движения при этом продолжают работать.
+  Оставьте оба поля пустыми для круглосуточного опроса.
+
+## Состав репозитория
+
+- `custom_components/ergostol/` — сама интеграция.
+- `PROTOCOL.md` — реконструированный BLE-протокол (проверен по реальному
+  дампу трафика).
+- `ergostol.py` — автономный CLI-контроллер (на `bleak`) для проверки с ноутбука.
+
+Подробности протокола — в [`PROTOCOL.md`](PROTOCOL.md); эталонная реализация
+замкнутого контура управления высотой — в `ergostol.py`.
+
+## Лицензия
+
+[MIT](LICENSE).
+
+Интеграция создана методом обратной разработки приложения `com.pairlink.ergostol`
+для личного использования и не связана с производителем Ergostol / PairLink.

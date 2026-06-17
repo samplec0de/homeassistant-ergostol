@@ -44,7 +44,6 @@
     "button": {
       "stop": { "name": "Стоп" },
       "preset_sit": { "name": "Пресет «сидя»" },
-      "preset_middle": { "name": "Пресет «средний»" },
       "preset_stand": { "name": "Пресет «стоя»" }
     }
   }

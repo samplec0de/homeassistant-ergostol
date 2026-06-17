@@ -4,6 +4,7 @@ See PROTOCOL.md at the repo root for the full description. Frames on the wire ar
 6 bytes: [op, p1, dHi, dLo, crcLo, crcHi]. CRC-16 is computed over a fixed header
 plus the 4 payload bytes; the header differs for the TX and RX directions.
 """
+
 from __future__ import annotations
 
 # GATT
@@ -23,15 +24,40 @@ OP_STOP = 9
 
 # Desk model index (init op-7 param 9 / MCU version) -> hall-per-cm factor (g.u).
 MODEL_GU = {
-    1: 29.333334, 2: 29.333334, 3: 11.0, 4: 44.0, 5: 26.0,
-    6: 58.666668, 7: 29.8, 8: 26.0, 9: 27.5, 10: 44.0, 11: 22.0,
+    1: 29.333334,
+    2: 29.333334,
+    3: 11.0,
+    4: 44.0,
+    5: 26.0,
+    6: 58.666668,
+    7: 29.8,
+    8: 26.0,
+    9: 27.5,
+    10: 44.0,
+    11: 22.0,
 }
 DEFAULT_GU = 44.0
 DEFAULT_BASE = 2816
 DEFAULT_MAX_RUN = 2875  # max_abs - base for the reference desk
 
-_CRC_TABLE = [0, 52225, 55297, 5120, 61441, 15360, 10240, 58369,
-              40961, 27648, 30720, 46081, 20480, 39937, 34817, 17408]
+_CRC_TABLE = [
+    0,
+    52225,
+    55297,
+    5120,
+    61441,
+    15360,
+    10240,
+    58369,
+    40961,
+    27648,
+    30720,
+    46081,
+    20480,
+    39937,
+    34817,
+    17408,
+]
 _TX_HEADER = bytes([0x04, 0xFC, 0x42, 0x06])
 _RX_HEADER = bytes([0x01, 0xFC, 0x41, 0x06])
 
@@ -58,7 +84,14 @@ def parse(data: bytes) -> tuple[int, int, int] | None:
     """
     if len(data) < 6:
         return None
-    op, p1, d_hi, d_lo, c_lo, c_hi = data[0], data[1], data[2], data[3], data[4], data[5]
+    op, p1, d_hi, d_lo, c_lo, c_hi = (
+        data[0],
+        data[1],
+        data[2],
+        data[3],
+        data[4],
+        data[5],
+    )
     crc = crc16(_RX_HEADER + bytes([op, p1, d_hi, d_lo]))
     if (crc & 0xFF) != c_lo or ((crc >> 8) & 0xFF) != c_hi:
         return None

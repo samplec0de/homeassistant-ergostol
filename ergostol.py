@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""Control an Ergostol standing desk over BLE from macOS.
+"""Управление столом Ergostol по BLE с macOS.
 
-Reverse-engineered from com.pairlink.ergostol (see PROTOCOL.md).
+Реконструировано из приложения com.pairlink.ergostol (см. PROTOCOL.md).
 
-Usage:
-    ergostol.py scan                       # list nearby BLE devices
-    ergostol.py info   [--address UUID]    # connect, print calibration + height
-    ergostol.py monitor [--address UUID]   # stream live height
-    ergostol.py up|down [--secs N]         # nudge for N seconds (default 1.0)
+Использование:
+    ergostol.py scan                       # список ближайших BLE-устройств
+    ergostol.py info   [--address UUID]    # подключиться, вывести калибровку + высоту
+    ergostol.py monitor [--address UUID]   # стрим живой высоты
+    ergostol.py up|down [--secs N]         # подвинуть на N секунд (по умолч. 1.0)
     ergostol.py stop
-    ergostol.py set CM  [--address UUID]   # closed-loop move to absolute height (cm)
-    ergostol.py preset stand|middle|sit    # recall a stored preset
+    ergostol.py set CM  [--address UUID]   # доехать до высоты (см) по контуру
+    ergostol.py preset stand|middle|sit    # вызвать сохранённый пресет
 """
+
 import argparse
 import asyncio
+import contextlib
 import sys
 
 from bleak import BleakClient, BleakScanner
@@ -21,14 +23,26 @@ from bleak import BleakClient, BleakScanner
 WRITE_UUID = "0000ff01-0000-1000-8000-00805f9b34fb"
 NOTIFY_UUID = "0000ff02-0000-1000-8000-00805f9b34fb"
 
-# Exact height model, reproduced from the app (utils/c.java b(int) + setDeskHeight):
-#   real_cm = (run_hall + base_hall) / g.u
-# op-8 returns run_hall (0 at lowest). base_hall = init op-7 param 5. g.u is chosen
-# by the desk model index = init op-7 param 9 (= MCU version, bArr[3]).
-MODEL_GU = {1: 29.333334, 2: 29.333334, 3: 11.0, 4: 44.0, 5: 26.0,
-            6: 58.666668, 7: 29.8, 8: 26.0, 9: 27.5, 10: 44.0, 11: 22.0}
+# Точная модель высоты, воспроизведённая из приложения (utils/c.java b(int) +
+# setDeskHeight): real_cm = (run_hall + base_hall) / g.u
+# op-8 возвращает run_hall (0 в самом низу). base_hall = параметр 5 init op-7.
+# g.u выбирается по индексу модели стола = параметр 9 init op-7 (= версия MCU, bArr[3]).
+MODEL_GU = {
+    1: 29.333334,
+    2: 29.333334,
+    3: 11.0,
+    4: 44.0,
+    5: 26.0,
+    6: 58.666668,
+    7: 29.8,
+    8: 26.0,
+    9: 27.5,
+    10: 44.0,
+    11: 22.0,
+}
 
-# Defaults for the known desk (model 4); overwritten per-connection by init_walk.
+# Значения по умолчанию для известного стола (модель 4); перезаписываются
+# на каждом подключении в init_walk.
 GU = 44.0
 BASE = 2816
 
@@ -40,13 +54,30 @@ def hall_to_cm(h):
 def cm_to_hall(cm):
     return round(cm * GU - BASE)
 
-# opcodes
+
+# коды операций
 OP_DOWN, OP_UP = 1, 2
 OP_STAND, OP_MIDDLE, OP_SIT = 3, 4, 5
 OP_QUERY, OP_STOP, OP_INIT = 8, 9, 7
 
-_TABLE = [0, 52225, 55297, 5120, 61441, 15360, 10240, 58369,
-          40961, 27648, 30720, 46081, 20480, 39937, 34817, 17408]
+_TABLE = [
+    0,
+    52225,
+    55297,
+    5120,
+    61441,
+    15360,
+    10240,
+    58369,
+    40961,
+    27648,
+    30720,
+    46081,
+    20480,
+    39937,
+    34817,
+    17408,
+]
 
 
 def crc16(buf):
@@ -59,23 +90,24 @@ def crc16(buf):
 
 def build(op, p1=1, d_hi=0, d_lo=0):
     body = [op & 0xFF, p1 & 0xFF, d_hi & 0xFF, d_lo & 0xFF]
-    c = crc16(bytes([0x04, 0xFC, 0x42, 0x06] + body))
-    return bytes(body + [c & 0xFF, (c >> 8) & 0xFF])
+    c = crc16(bytes([4, 252, 66, 6, *body]))
+    return bytes([*body, c & 255, c >> 8 & 255])
 
 
 def hall_of(data):
     return ((data[2] & 0xFF) << 8) | (data[3] & 0xFF)
 
 
-# ---------- device discovery ----------
+# ---------- поиск устройства ----------
+
 
 async def find_device(address=None, timeout=8.0):
     if address:
         dev = await BleakScanner.find_device_by_address(address, timeout=timeout)
         if dev:
             return dev
-    # auto: pick a device that advertises the ff01/ff02 service or a desk-like name
-    print(f"Scanning {timeout:.0f}s for the desk adapter...", file=sys.stderr)
+    # авто: выбираем устройство с сервисом ff01/ff02 или с похожим на стол именем
+    print(f"Сканирование {timeout:.0f}с в поиске адаптера стола...", file=sys.stderr)
     found = await BleakScanner.discover(timeout=timeout, return_adv=True)
     candidates = []
     for dev, adv in found.values():
@@ -94,20 +126,21 @@ async def find_device(address=None, timeout=8.0):
     return candidates[0][1]
 
 
-# ---------- connection helper ----------
+# ---------- помощник подключения ----------
+
 
 class Desk:
     def __init__(self, client):
         self.client = client
         self.last_hall = None
-        self.calib = {}          # p1 -> hall from init walk
+        self.calib = {}  # p1 -> hall из init walk
         self._listeners = []
         self.write_char = None
         self.notify_char = None
 
     def _resolve_chars(self):
-        """Find write + notify characteristics, preferring ff01/ff02 but
-        falling back to any write/notify pair (GATT may use other UUIDs)."""
+        """Найти характеристики записи и уведомлений: предпочитаем ff01/ff02,
+        иначе берём любую пару write/notify (GATT может использовать другие UUID)."""
         write = notify = None
         for s in self.client.services:
             for ch in s.characteristics:
@@ -117,12 +150,13 @@ class Desk:
                     write = ch
                 elif u == NOTIFY_UUID:
                     notify = ch
-                if write is None and ("write" in props or
-                                      "write-without-response" in props):
+                if write is None and (
+                    "write" in props or "write-without-response" in props
+                ):
                     write = write or ch
                 if notify is None and ("notify" in props or "indicate" in props):
                     notify = notify or ch
-        # exact UUID match wins if present
+        # точное совпадение по UUID имеет приоритет, если оно есть
         for s in self.client.services:
             for ch in s.characteristics:
                 if ch.uuid.lower() == WRITE_UUID:
@@ -136,23 +170,31 @@ class Desk:
         write, notify = self._resolve_chars()
         if notify is None or write is None:
             raise RuntimeError(
-                "Could not find write/notify characteristics. GATT table:\n" +
-                "\n".join(f"  {s.uuid}: " + ", ".join(
-                    f"{c.uuid}({'/'.join(c.properties)})" for c in s.characteristics)
-                    for s in self.client.services))
-        print(f"write  char: {write.uuid} ({'/'.join(write.properties)})",
-              file=sys.stderr)
-        print(f"notify char: {notify.uuid} ({'/'.join(notify.properties)})",
-              file=sys.stderr)
+                "Не найдены характеристики write/notify. Таблица GATT:\n"
+                + "\n".join(
+                    f"  {s.uuid}: "
+                    + ", ".join(
+                        f"{c.uuid}({'/'.join(c.properties)})" for c in s.characteristics
+                    )
+                    for s in self.client.services
+                )
+            )
+        print(
+            f"write  char: {write.uuid} ({'/'.join(write.properties)})", file=sys.stderr
+        )
+        print(
+            f"notify char: {notify.uuid} ({'/'.join(notify.properties)})",
+            file=sys.stderr,
+        )
         await self.client.start_notify(notify, self._on_notify)
 
     def _on_notify(self, _char, data):
         b = bytes(data)
         if len(b) >= 4:
             op = b[0]
-            # Height only comes from query/run (8) and stop (9) replies. Other
-            # packets (command echoes, reminders) carry 0 in bytes 2-3 and would
-            # otherwise corrupt last_hall.
+            # Высота приходит только из ответов query/run (8) и stop (9). Остальные
+            # пакеты (эхо команд, напоминания) несут 0 в байтах 2-3 и иначе
+            # испортили бы last_hall.
             if op in (OP_QUERY, OP_STOP):
                 self.last_hall = hall_of(b)
             if op == OP_INIT:
@@ -162,9 +204,11 @@ class Desk:
 
     async def send(self, payload):
         ch = self.write_char or WRITE_UUID
-        no_resp = getattr(ch, "properties", []) and \
-            "write" not in ch.properties and \
-            "write-without-response" in ch.properties
+        no_resp = (
+            getattr(ch, "properties", [])
+            and "write" not in ch.properties
+            and "write-without-response" in ch.properties
+        )
         try:
             await self.client.write_gatt_char(ch, payload, response=not no_resp)
         except Exception:
@@ -174,7 +218,7 @@ class Desk:
         await self.send(build(op, p1, d_hi, d_lo))
 
     async def init_walk(self, timeout=4.0):
-        """Walk op-7 p1=1..8 to read calibration; returns dict p1->hall."""
+        """Обойти op-7 p1=1..8 для чтения калибровки; вернуть dict p1->hall."""
         done = asyncio.Event()
 
         def watch(b):
@@ -186,14 +230,12 @@ class Desk:
             for p1 in list(range(1, 12)):
                 await self.cmd(OP_INIT, p1)
                 await asyncio.sleep(0.15)
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(done.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
-                pass
         finally:
             self._listeners.remove(watch)
-        # Set the exact cm conversion from the desk's own calibration.
-        global GU, BASE
+        # Устанавливаем точный пересчёт в см из собственной калибровки стола.
+        global GU, BASE  # noqa: PLW0603
         if self.calib.get(5) is not None:
             BASE = self.calib[5]
         model = self.calib.get(9)
@@ -205,10 +247,13 @@ class Desk:
 async def connected_desk(address):
     dev = await find_device(address)
     if not dev:
-        print("Desk adapter not found. Is it powered and advertising? "
-              "Run `ergostol.py scan` to list devices.", file=sys.stderr)
+        print(
+            "Адаптер стола не найден. Он включён и виден в эфире? "
+            "Запустите `ergostol.py scan` для списка устройств.",
+            file=sys.stderr,
+        )
         sys.exit(2)
-    print(f"Connecting to {dev.name or '?'} [{dev.address}]...", file=sys.stderr)
+    print(f"Подключение к {dev.name or '?'} [{dev.address}]...", file=sys.stderr)
     client = BleakClient(dev)
     await client.connect()
     try:
@@ -220,20 +265,30 @@ async def connected_desk(address):
     return client, desk
 
 
-# ---------- commands ----------
+# ---------- команды ----------
+
 
 async def cmd_scan(args):
     found = await BleakScanner.discover(timeout=args.secs, return_adv=True)
     rows = []
     for dev, adv in found.values():
         uuids = ",".join(adv.service_uuids or [])
-        rows.append((adv.rssi or -999, dev.address, adv.local_name or dev.name or "", uuids))
+        rows.append(
+            (adv.rssi or -999, dev.address, adv.local_name or dev.name or "", uuids)
+        )
     rows.sort(key=lambda r: -r[0])
-    print(f"{'RSSI':>5}  {'ADDRESS':36}  NAME / services")
+    print(f"{'RSSI':>5}  {'ADDRESS':36}  ИМЯ / сервисы")
     for rssi, addr, name, uuids in rows:
-        mark = "  <-- candidate" if ("ff0" in uuids.lower() or
-               any(k in name.lower() for k in ("ergo", "stol", "ding", "desk"))) else ""
-        print(f"{rssi:>5}  {addr:36}  {name}{('  ['+uuids+']') if uuids else ''}{mark}")
+        mark = (
+            "  <-- кандидат"
+            if (
+                "ff0" in uuids.lower()
+                or any(k in name.lower() for k in ("ergo", "stol", "ding", "desk"))
+            )
+            else ""
+        )
+        suffix = f"  [{uuids}]" if uuids else ""
+        print(f"{rssi:>5}  {addr:36}  {name}{suffix}{mark}")
 
 
 async def cmd_info(args):
@@ -242,14 +297,14 @@ async def cmd_info(args):
         calib = await desk.init_walk()
         base = calib.get(5, 0)
         mn, mx = calib.get(6), calib.get(7)
-        print("Calibration (hall):", calib)
+        print("Калибровка (hall):", calib)
         if mn is not None:
-            print(f"min height: {hall_to_cm(mn - base):6.1f} cm")
+            print(f"мин. высота: {hall_to_cm(mn - base):6.1f} см")
         if mx is not None:
-            print(f"max height: {hall_to_cm(mx - base):6.1f} cm")
+            print(f"макс. высота: {hall_to_cm(mx - base):6.1f} см")
         cur = await read_height(desk)
         if cur is not None:
-            print(f"current   : {hall_to_cm(cur):6.1f} cm (hall {cur})")
+            print(f"текущая    : {hall_to_cm(cur):6.1f} см (hall {cur})")
     finally:
         await client.disconnect()
 
@@ -258,12 +313,16 @@ async def cmd_monitor(args):
     client, desk = await connected_desk(args.address)
 
     def show(b):
-        print("notify:", " ".join(f"{x:02x}" for x in b),
-              f"  hall={hall_of(b) if len(b) >= 4 else '?'}")
+        print(
+            "notify:",
+            " ".join(f"{x:02x}" for x in b),
+            f"  hall={hall_of(b) if len(b) >= 4 else '?'}",
+        )
+
     desk._listeners.append(show)
     try:
         await desk.cmd(OP_QUERY)
-        print("Monitoring (Ctrl-C to stop)...", file=sys.stderr)
+        print("Мониторинг (Ctrl-C для остановки)...", file=sys.stderr)
         await asyncio.sleep(args.secs)
     finally:
         await client.disconnect()
@@ -272,10 +331,10 @@ async def cmd_monitor(args):
 async def cmd_nudge(args, op):
     client, desk = await connected_desk(args.address)
     try:
-        await desk.init_walk()   # set GU/BASE for correct cm display
+        await desk.init_walk()  # выставить GU/BASE для верного показа в см
         before = await read_height(desk)
         if before is not None:
-            print(f"before: {hall_to_cm(before):.1f} cm")
+            print(f"до: {hall_to_cm(before):.1f} см")
         await desk.cmd(op)
         t = 0.0
         while t < args.secs:
@@ -285,7 +344,7 @@ async def cmd_nudge(args, op):
             await desk.cmd(OP_QUERY)
             await asyncio.sleep(0.03)
             if desk.last_hall is not None:
-                print(f"  {hall_to_cm(desk.last_hall):6.1f} cm", file=sys.stderr)
+                print(f"  {hall_to_cm(desk.last_hall):6.1f} см", file=sys.stderr)
     finally:
         await desk.cmd(OP_STOP)
         await asyncio.sleep(0.3)
@@ -293,7 +352,7 @@ async def cmd_nudge(args, op):
         after = await read_height(desk)
         await client.disconnect()
     if after is not None:
-        print(f"after: {hall_to_cm(after):.1f} cm")
+        print(f"после: {hall_to_cm(after):.1f} см")
 
 
 async def cmd_stop(args):
@@ -313,11 +372,11 @@ async def cmd_preset(args):
         await asyncio.sleep(args.secs)
     finally:
         await client.disconnect()
-    print(f"preset {args.which} sent; last hall={desk.last_hall}")
+    print(f"пресет {args.which} отправлен; last hall={desk.last_hall}")
 
 
 async def read_height(desk, tries=8):
-    """Poll op-8 until we get a fresh run-hall reading."""
+    """Опрашивать op-8, пока не получим свежее показание run-hall."""
     for _ in range(tries):
         desk.last_hall = None
         await desk.cmd(OP_QUERY)
@@ -328,7 +387,7 @@ async def read_height(desk, tries=8):
 
 
 async def cmd_set(args):
-    # op-8 returns the run hall (0..max_run). cm = (hall + base) / g.u.
+    # op-8 возвращает run hall (0..max_run). cm = (hall + base) / g.u.
     client, desk = await connected_desk(args.address)
     try:
         calib = await desk.init_walk()
@@ -338,35 +397,38 @@ async def cmd_set(args):
         target = max(0, min(max_run, target))
         clamped = hall_to_cm(target)
         if abs(clamped - args.cm) > 0.1:
-            print(f"clamped to range [{hall_to_cm(0):.1f}, "
-                  f"{hall_to_cm(max_run):.1f}] cm -> {clamped:.1f} cm",
-                  file=sys.stderr)
-        tol = round(0.4 * GU)   # ~0.4 cm
+            print(
+                f"ограничено диапазоном [{hall_to_cm(0):.1f}, "
+                f"{hall_to_cm(max_run):.1f}] см -> {clamped:.1f} см",
+                file=sys.stderr,
+            )
+        tol = round(0.4 * GU)  # ~0.4 см
 
         cur = await read_height(desk)
         if cur is None:
-            print("No height feedback; aborting.", file=sys.stderr)
+            print("Нет обратной связи по высоте; прерываю.", file=sys.stderr)
             return
-        print(f"current {hall_to_cm(cur):.1f} cm (hall {cur}) -> "
-              f"target {clamped:.1f} cm (hall {target})")
+        print(
+            f"текущая {hall_to_cm(cur):.1f} см (hall {cur}) -> "
+            f"цель {clamped:.1f} см (hall {target})"
+        )
         if abs(cur - target) <= tol:
-            print("already at target.")
+            print("уже на цели.")
             return
 
-        # The carriage coasts ~LEAD hall after STOP, so brake early.
+        # Каретка проезжает ~LEAD hall по инерции после STOP — тормозим заранее.
         LEAD = 55
         loop = asyncio.get_event_loop()
         deadline = loop.time() + 60.0
 
         async def glide(tgt):
-            """Drive toward tgt at full speed, braking LEAD hall early."""
+            """Ехать к tgt на полной скорости, тормозя за LEAD hall до цели."""
             cur = await read_height(desk, tries=3)
             if cur is None or abs(cur - tgt) <= tol:
                 return cur
             direction = OP_UP if cur < tgt else OP_DOWN
             brake = (tgt - LEAD) if direction == OP_UP else (tgt + LEAD)
-            print("moving", "UP" if direction == OP_UP else "DOWN",
-                  file=sys.stderr)
+            print("еду", "ВВЕРХ" if direction == OP_UP else "ВНИЗ", file=sys.stderr)
             last, last_prog = cur, loop.time()
             await desk.cmd(direction)
             while True:
@@ -377,17 +439,18 @@ async def cmd_set(args):
                     if now > deadline:
                         break
                     continue
-                print(f"  {hall_to_cm(cur):6.1f} cm (hall {cur})", file=sys.stderr)
-                if (direction == OP_UP and cur >= brake) or \
-                   (direction == OP_DOWN and cur <= brake):
+                print(f"  {hall_to_cm(cur):6.1f} см (hall {cur})", file=sys.stderr)
+                if (direction == OP_UP and cur >= brake) or (
+                    direction == OP_DOWN and cur <= brake
+                ):
                     break
                 if abs(cur - last) > 1:
                     last, last_prog = cur, now
                 elif now - last_prog > 3.0:
-                    print("no progress (limit reached?); stopping.", file=sys.stderr)
+                    print("нет движения (достигнут предел?); стоп.", file=sys.stderr)
                     break
                 if now > deadline:
-                    print("timeout; stopping.", file=sys.stderr)
+                    print("таймаут; стоп.", file=sys.stderr)
                     break
             await desk.cmd(OP_STOP)
             await asyncio.sleep(0.35)
@@ -395,7 +458,7 @@ async def cmd_set(args):
             return await read_height(desk)
 
         async def nudge_to(tgt):
-            """Fine approach with short pulses (minimal coast from standstill)."""
+            """Точное доведение короткими импульсами (минимум инерции с места)."""
             for _ in range(6):
                 cur = await read_height(desk)
                 if cur is None or abs(cur - tgt) <= tol:
@@ -410,38 +473,45 @@ async def cmd_set(args):
 
         cur = await glide(target)
         if cur is not None and abs(cur - target) > tol:
-            print(f"  fine-tuning from {hall_to_cm(cur):.1f} cm...", file=sys.stderr)
+            print(f"  доводка с {hall_to_cm(cur):.1f} см...", file=sys.stderr)
             cur = await nudge_to(target)
         final = cur if cur is not None else await read_height(desk)
-        print(f"stopped at {hall_to_cm(final):.1f} cm (hall {final})")
+        print(f"остановился на {hall_to_cm(final):.1f} см (hall {final})")
     finally:
-        try:
+        with contextlib.suppress(Exception):
             await desk.cmd(OP_STOP)
-        except Exception:
-            pass
         await client.disconnect()
 
 
 def main():
-    p = argparse.ArgumentParser(description="Ergostol desk BLE controller")
-    p.add_argument("--address", help="BLE address/UUID of the desk adapter")
+    p = argparse.ArgumentParser(description="BLE-контроллер стола Ergostol")
+    p.add_argument("--address", help="BLE-адрес/UUID адаптера стола")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("scan"); s.add_argument("--secs", type=float, default=8.0)
+    s = sub.add_parser("scan")
+    s.add_argument("--secs", type=float, default=8.0)
     sub.add_parser("info")
-    m = sub.add_parser("monitor"); m.add_argument("--secs", type=float, default=30.0)
-    u = sub.add_parser("up"); u.add_argument("--secs", type=float, default=1.0)
-    d = sub.add_parser("down"); d.add_argument("--secs", type=float, default=1.0)
+    m = sub.add_parser("monitor")
+    m.add_argument("--secs", type=float, default=30.0)
+    u = sub.add_parser("up")
+    u.add_argument("--secs", type=float, default=1.0)
+    d = sub.add_parser("down")
+    d.add_argument("--secs", type=float, default=1.0)
     sub.add_parser("stop")
-    st = sub.add_parser("set"); st.add_argument("cm", type=float)
+    st = sub.add_parser("set")
+    st.add_argument("cm", type=float)
     pr = sub.add_parser("preset")
     pr.add_argument("which", choices=["stand", "middle", "sit"])
     pr.add_argument("--secs", type=float, default=20.0)
 
     args = p.parse_args()
     dispatch = {
-        "scan": cmd_scan, "info": cmd_info, "monitor": cmd_monitor,
-        "stop": cmd_stop, "set": cmd_set, "preset": cmd_preset,
+        "scan": cmd_scan,
+        "info": cmd_info,
+        "monitor": cmd_monitor,
+        "stop": cmd_stop,
+        "set": cmd_set,
+        "preset": cmd_preset,
         "up": lambda a: cmd_nudge(a, OP_UP),
         "down": lambda a: cmd_nudge(a, OP_DOWN),
     }

@@ -1,4 +1,5 @@
 """Config flow for the Ergostol Desk integration."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -117,7 +118,10 @@ class ErgostolOptionsFlow(OptionsFlow):
         opts = self.config_entry.options
         height = selector.NumberSelector(
             selector.NumberSelectorConfig(
-                min=60, max=132, step=0.5, unit_of_measurement="cm",
+                min=60,
+                max=132,
+                step=0.5,
+                unit_of_measurement="cm",
                 mode=selector.NumberSelectorMode.BOX,
             )
         )

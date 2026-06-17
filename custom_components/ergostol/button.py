@@ -1,4 +1,5 @@
 """Button platform: stop + preset recall."""
+
 from __future__ import annotations
 
 from homeassistant.components.button import ButtonEntity

@@ -1,4 +1,5 @@
 """Number platform: target/current desk height in cm."""
+
 from __future__ import annotations
 
 from homeassistant.components.number import (
