@@ -220,9 +220,15 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
 
     # ---- coordinator poll ----
     async def _async_update_data(self) -> ErgostolData:
-        # During quiet hours skip the height query so the desk's LED panel stays
-        # dark. Explicit moves (set height / presets / stop) still work.
+        # During quiet hours drop the BLE link entirely instead of holding it
+        # open in silence: after hours without traffic the desk's BLE module
+        # wedges, jamming the controller bus (E04 "communication fault", the
+        # handset stops responding, no advertising until a power-cycle).
+        # Disconnected overnight is the desk's normal state; explicit moves
+        # (set height / presets / stop) still reconnect on demand.
         if self._in_quiet_hours():
+            async with self._lock:
+                await self._disconnect()
             return ErgostolData(
                 height_cm=self._height_cm, moving=self._moving, available=True
             )
@@ -237,7 +243,7 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
 
     def _publish(self, hall: int | None, moving: bool) -> None:
         if hall is not None:
-            self._height_cm = round(self.hall_to_cm(hall), 1)
+            self._height_cm = self._display_cm(hall)
         self.async_set_updated_data(
             ErgostolData(height_cm=self._height_cm, moving=moving, available=True)
         )
@@ -363,9 +369,12 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
                 cur = await self._read_height_hall()
                 self._publish(cur, moving=False)
 
+    async def _disconnect(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+
     async def async_shutdown(self) -> None:
         await super().async_shutdown()
-        if self._client is not None:
-            with contextlib.suppress(Exception):
-                await self._client.disconnect()
-            self._client = None
+        await self._disconnect()
