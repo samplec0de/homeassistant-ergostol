@@ -7,8 +7,10 @@ import contextlib
 from dataclasses import dataclass
 from datetime import time as dt_time, timedelta
 import logging
+import time
 
 from bleak.backends.device import BLEDevice
+from bleak.exc import BleakError
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 
 from homeassistant.components import bluetooth
@@ -89,6 +91,7 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         self._moving = False
         self._height_cm: float | None = None
         self._target_hall: int | None = None  # last commanded target (for snap)
+        self._silent_since: float | None = None  # op-8 unanswered since (monotonic)
 
     # ---- conversions ----
     def hall_to_cm(self, hall: int) -> float:
@@ -126,7 +129,8 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
 
     # ---- connection ----
     def _on_disconnect(self, _client) -> None:
-        _LOGGER.debug("Ergostol %s disconnected", self.address)
+        # INFO on purpose: spontaneous drops are a key E04 diagnostic signal.
+        _LOGGER.info("Ergostol %s: BLE link closed", self.address)
         self._client = None
 
     async def _ensure_connected(self) -> None:
@@ -137,20 +141,43 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         )
         if ble_device is None:
             raise UpdateFailed(f"Ergostol {self.address} not in range / no adapter")
-        self._client = await establish_connection(
-            BleakClientWithServiceCache,
-            ble_device,
-            self.address,
-            self._on_disconnect,
-        )
-        await self._client.start_notify(NOTIFY_UUID, self._handle_notify)
-        await self._init_walk()
+        try:
+            self._client = await establish_connection(
+                BleakClientWithServiceCache,
+                ble_device,
+                self.address,
+                self._on_disconnect,
+            )
+            _LOGGER.info("Ergostol %s: BLE connected", self.address)
+            await self._client.start_notify(NOTIFY_UUID, self._handle_notify)
+            await self._init_walk()
+        except (BleakError, TimeoutError) as err:
+            # Transient: the desk stopped advertising, the adapter is out of
+            # connection slots, or GATT setup failed. Wrap as UpdateFailed so the
+            # coordinator logs one clean line and retries, instead of dumping a
+            # full traceback under "Unexpected error" on every poll. Drop any
+            # half-open client so the next poll reconnects from a clean state.
+            await self._disconnect()
+            raise UpdateFailed(
+                f"Ergostol {self.address}: BLE connect failed: {err}"
+            ) from err
 
     def _handle_notify(self, _char, data: bytearray) -> None:
         parsed = parse(bytes(data))
         if parsed is None:
             return
         op, p1, hall = parsed
+        if op not in (OP_QUERY, OP_STOP, OP_INIT):
+            # E.g. op-11 handset-handshake / op-12 heartbeat (the vendor app ACKs
+            # these, we don't) — log them so we can see if/when the desk asks.
+            _LOGGER.debug(
+                "Ergostol %s: unhandled frame op=%s p1=%s d=%s",
+                self.address,
+                op,
+                p1,
+                hall,
+            )
+            return
         if op in (OP_QUERY, OP_STOP):
             self._last_hall = hall
             self._height_event.set()
@@ -194,9 +221,26 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
             await self._write(build(OP_QUERY))
             try:
                 await asyncio.wait_for(self._height_event.wait(), 0.5)
-                return self._last_hall
             except TimeoutError:
                 continue
+            if self._silent_since is not None:
+                _LOGGER.warning(
+                    "Ergostol %s: op-8 replies resumed after %.0f s of silence",
+                    self.address,
+                    time.monotonic() - self._silent_since,
+                )
+                self._silent_since = None
+            return self._last_hall
+        # GATT connected but the controller bus does not answer op-8 — the
+        # E04 signature. Log once per silence episode, not per poll.
+        if self._silent_since is None and self._client is not None:
+            self._silent_since = time.monotonic()
+            _LOGGER.warning(
+                "Ergostol %s: connected but no reply to op-8 after %d tries "
+                "(controller bus silent — E04?)",
+                self.address,
+                tries,
+            )
         return None
 
     # ---- quiet hours ----
@@ -228,6 +272,11 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         # (set height / presets / stop) still reconnect on demand.
         if self._in_quiet_hours():
             async with self._lock:
+                if self._client is not None:
+                    _LOGGER.info(
+                        "Ergostol %s: quiet hours — dropping BLE for the night",
+                        self.address,
+                    )
                 await self._disconnect()
             return ErgostolData(
                 height_cm=self._height_cm, moving=self._moving, available=True
