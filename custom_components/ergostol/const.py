@@ -18,7 +18,15 @@ CONF_STAND_HEIGHT = "stand_height"
 DEFAULT_SIT_HEIGHT = 73.0
 DEFAULT_STAND_HEIGHT = 115.0
 
+# Entry data: cached init-walk calibration (static per desk). Lets reconnects
+# skip the 11-step walk — burst writes right after the module wakes are the
+# prime suspect for the E04 "communication fault" on the handset bus.
+CONF_CALIBRATION = "calibration"
+
 # Coordinator behaviour
+CONNECT_SETTLE_DELAY = 1.0  # seconds after connect before the first write
+INIT_STEP_TIMEOUT = 0.5  # seconds to wait for each init-walk reply
+INIT_STEP_RETRIES = 3  # attempts per init-walk step before giving up
 IDLE_POLL_INTERVAL = 5.0  # seconds between height polls while idle
 # (also reflects handset-driven changes quickly)
 MOVE_TIMEOUT = 60.0  # max seconds for one move

@@ -7,6 +7,8 @@ plus the 4 payload bytes; the header differs for the TX and RX directions.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 # GATT
 SERVICE_UUID = "0000ff12-0000-1000-8000-00805f9b34fb"
 WRITE_UUID = "0000ff01-0000-1000-8000-00805f9b34fb"
@@ -21,6 +23,34 @@ OP_SIT = 5
 OP_INIT = 7
 OP_QUERY = 8
 OP_STOP = 9
+
+# Status frames pushed by the desk: the p1 byte doubles as a flag field.
+# p1=0x80 (any op) carries an error code in the data bytes — the code shown on
+# the handset display (4 -> "E04"); 0 means the fault cleared. p1=0x20 is the
+# "hot state" push during init (the vendor app answers it with op-12).
+P1_ERROR = 0x80
+P1_HOT = 0x20
+
+_ERROR_KEYS = {
+    0: "none",
+    1: "e01",  # motor stop
+    2: "e02",  # synchronisation >15 mm
+    3: "e03",  # cable
+    4: "e04",  # communication fault (handset<->controller bus)
+    5: "e05",  # overload
+    32: "hot",  # thermal protection
+}
+
+
+def error_key(code: int) -> str:
+    """Stable key for a desk error code (matches the handset display)."""
+    return _ERROR_KEYS.get(code, "unknown")
+
+
+def is_calib_step(p1: int) -> bool:
+    """True if an op-7 frame with this p1 is an init-walk calibration reply."""
+    return 1 <= p1 <= 11
+
 
 # Desk model index (init op-7 param 9 / MCU version) -> hall-per-cm factor (g.u).
 MODEL_GU = {
@@ -39,6 +69,24 @@ MODEL_GU = {
 DEFAULT_GU = 44.0
 DEFAULT_BASE = 2816
 DEFAULT_MAX_RUN = 2875  # max_abs - base for the reference desk
+
+
+class Calibration(NamedTuple):
+    """Static per-desk values learned from the init walk."""
+
+    base: int  # hall offset of the lowest position (op-7 p5)
+    gu: float  # hall units per cm, from the model index (op-7 p9)
+    max_run: int  # travel range in hall units (op-7 p7 minus base)
+
+
+def derive_calibration(calib: dict[int, int]) -> Calibration:
+    """Derive desk calibration from collected init-walk replies (p1 -> value)."""
+    base = calib.get(5, DEFAULT_BASE)
+    gu = MODEL_GU.get(calib.get(9), DEFAULT_GU)
+    max_abs = calib.get(7)
+    max_run = (max_abs - base) if max_abs else DEFAULT_MAX_RUN
+    return Calibration(base, gu, max_run)
+
 
 _CRC_TABLE = [
     0,

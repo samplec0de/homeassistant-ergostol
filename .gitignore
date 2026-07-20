@@ -5,3 +5,4 @@ apk/
 *.pcapng
 .DS_Store
 scripts/*.local
+.pytest_cache/

@@ -36,7 +36,20 @@
       "height": { "name": "Height" }
     },
     "sensor": {
-      "current_height": { "name": "Current height" }
+      "current_height": { "name": "Current height" },
+      "desk_error": {
+        "name": "Fault",
+        "state": {
+          "none": "None",
+          "e01": "E01 — motor stop",
+          "e02": "E02 — desynchronised",
+          "e03": "E03 — cable",
+          "e04": "E04 — communication",
+          "e05": "E05 — overload",
+          "hot": "Overheated",
+          "unknown": "Unknown"
+        }
+      }
     },
     "binary_sensor": {
       "moving": { "name": "Moving" }

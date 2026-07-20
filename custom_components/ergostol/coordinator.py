@@ -21,14 +21,18 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_CALIBRATION,
     CONF_QUIET_END,
     CONF_QUIET_START,
     CONF_SIT_HEIGHT,
     CONF_STAND_HEIGHT,
+    CONNECT_SETTLE_DELAY,
     DEFAULT_SIT_HEIGHT,
     DEFAULT_STAND_HEIGHT,
     DOMAIN,
     IDLE_POLL_INTERVAL,
+    INIT_STEP_RETRIES,
+    INIT_STEP_TIMEOUT,
     MOVE_TIMEOUT,
     STOP_LEAD_HALL,
     TOLERANCE_CM,
@@ -37,7 +41,6 @@ from .protocol import (
     DEFAULT_BASE,
     DEFAULT_GU,
     DEFAULT_MAX_RUN,
-    MODEL_GU,
     NOTIFY_UUID,
     OP_DOWN,
     OP_INIT,
@@ -47,8 +50,13 @@ from .protocol import (
     OP_STAND,
     OP_STOP,
     OP_UP,
+    P1_ERROR,
     WRITE_UUID,
+    Calibration,
     build,
+    derive_calibration,
+    error_key,
+    is_calib_step,
     parse,
 )
 
@@ -64,6 +72,7 @@ class ErgostolData:
     height_cm: float | None
     moving: bool
     available: bool
+    error_code: int = 0  # desk fault as pushed in p1=0x80 frames (4 = E04)
 
 
 class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
@@ -85,9 +94,13 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         self._last_hall: int | None = None
         self._height_event = asyncio.Event()
         self._calib: dict[int, int] = {}
-        self._gu = DEFAULT_GU
-        self._base = DEFAULT_BASE
-        self._max_run = DEFAULT_MAX_RUN
+        self._calib_event = asyncio.Event()
+        cached = entry.data.get(CONF_CALIBRATION) or {}
+        self._gu = cached.get("gu", DEFAULT_GU)
+        self._base = cached.get("base", DEFAULT_BASE)
+        self._max_run = cached.get("max_run", DEFAULT_MAX_RUN)
+        self._calibrated = bool(cached)
+        self._error_code = 0
         self._moving = False
         self._height_cm: float | None = None
         self._target_hall: int | None = None  # last commanded target (for snap)
@@ -150,7 +163,12 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
             )
             _LOGGER.info("Ergostol %s: BLE connected", self.address)
             await self._client.start_notify(NOTIFY_UUID, self._handle_notify)
-            await self._init_walk()
+            # Give the module a moment to finish waking its side of the
+            # handset<->controller bus before we write anything — a write
+            # burst right at wake-up is the prime E04 suspect.
+            await asyncio.sleep(CONNECT_SETTLE_DELAY)
+            if not self._calibrated:
+                await self._init_walk()
         except (BleakError, TimeoutError) as err:
             # Transient: the desk stopped advertising, the adapter is out of
             # connection slots, or GATT setup failed. Wrap as UpdateFailed so the
@@ -167,16 +185,24 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         if parsed is None:
             return
         op, p1, hall = parsed
-        if op not in (OP_QUERY, OP_STOP, OP_INIT):
-            # E.g. op-11 handset-handshake / op-12 heartbeat (the vendor app ACKs
-            # these, we don't) — log them so we can see if/when the desk asks.
-            _LOGGER.debug(
-                "Ergostol %s: unhandled frame op=%s p1=%s d=%s",
-                self.address,
-                op,
-                p1,
-                hall,
-            )
+        if p1 == P1_ERROR:
+            # Fault push (any op): the code the handset displays, 0 = cleared.
+            # Must be checked before the op dispatch — an op-8 error frame
+            # would otherwise be read as a height.
+            self._set_error(hall)
+            return
+        if op == OP_INIT:
+            if is_calib_step(p1):
+                self._calib[p1] = hall
+                self._calib_event.set()
+            else:
+                # E.g. p1=0x20 "hot state" (the vendor app answers op-12).
+                _LOGGER.debug(
+                    "Ergostol %s: status frame op=7 p1=0x%02X d=%s",
+                    self.address,
+                    p1,
+                    hall,
+                )
             return
         if op in (OP_QUERY, OP_STOP):
             self._last_hall = hall
@@ -185,8 +211,32 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
             # our own moves the move loop already publishes, so skip then.
             if not self._moving and self.data is not None:
                 self._publish(hall, moving=False)
-        elif op == OP_INIT:
-            self._calib[p1] = hall
+            return
+        # E.g. op-11 handset-handshake / op-12 heartbeat (the vendor app ACKs
+        # these, we don't) — log them so we can see if/when the desk asks.
+        _LOGGER.debug(
+            "Ergostol %s: unhandled frame op=%s p1=%s d=%s",
+            self.address,
+            op,
+            p1,
+            hall,
+        )
+
+    def _set_error(self, code: int) -> None:
+        if code == self._error_code:
+            return
+        self._error_code = code
+        if code:
+            _LOGGER.warning(
+                "Ergostol %s: desk reports fault %s (code %s)",
+                self.address,
+                error_key(code).upper(),
+                code,
+            )
+        else:
+            _LOGGER.info("Ergostol %s: desk fault cleared", self.address)
+        if self.data is not None:
+            self._publish(None, moving=self._moving)
 
     async def _write(self, payload: bytes) -> None:
         # Serialised so Stop can write op-9 while a move loop is also writing.
@@ -196,17 +246,33 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
             await self._client.write_gatt_char(WRITE_UUID, payload, response=False)
 
     async def _init_walk(self) -> None:
-        """Read the desk's calibration (base hall, model -> g.u, travel range)."""
+        """Read the desk's calibration (base hall, model -> g.u, travel range).
+
+        Reply-paced like the vendor app: send one op-7 step and wait for its
+        reply before the next (the app's BLE lib repeats a frame until any
+        notify arrives — same effect). Our old blind 0.15s-cadence burst right
+        after wake-up collided with the desk's own traffic on the shared
+        handset<->controller bus (the E04 "communication fault").
+        """
         self._calib = {}
         for p1 in range(1, 12):
-            await self._write(build(OP_INIT, p1))
-            await asyncio.sleep(0.15)
-        await asyncio.sleep(0.3)
-        self._base = self._calib.get(5, DEFAULT_BASE)
-        self._gu = MODEL_GU.get(self._calib.get(9), DEFAULT_GU)
-        max_abs = self._calib.get(7)
-        self._max_run = (max_abs - self._base) if max_abs else DEFAULT_MAX_RUN
-        _LOGGER.debug(
+            for _ in range(INIT_STEP_RETRIES):
+                self._calib_event.clear()
+                await self._write(build(OP_INIT, p1))
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._calib_event.wait(), INIT_STEP_TIMEOUT)
+                if p1 in self._calib:
+                    break
+        missing = [p1 for p1 in (5, 7, 9) if p1 not in self._calib]
+        if missing:
+            # No usable calibration — treat as a failed connect attempt (the
+            # caller wraps this into UpdateFailed) rather than caching guesses.
+            raise TimeoutError(f"init walk unanswered for steps {missing}")
+        cal = derive_calibration(self._calib)
+        self._base, self._gu, self._max_run = cal.base, cal.gu, cal.max_run
+        self._calibrated = True
+        self._store_calibration(cal)
+        _LOGGER.info(
             "Ergostol %s calibrated: base=%s g.u=%s range=%s..%s cm",
             self.address,
             self._base,
@@ -214,6 +280,16 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
             self.min_cm,
             self.max_cm,
         )
+
+    def _store_calibration(self, cal: Calibration) -> None:
+        # Persist so reconnects and restarts skip the walk entirely. Written
+        # only when the values change: the entry update listener reloads the
+        # integration, so an unconditional write would reload on every walk.
+        as_dict = {"base": cal.base, "gu": cal.gu, "max_run": cal.max_run}
+        if self.entry.data.get(CONF_CALIBRATION) != as_dict:
+            self.hass.config_entries.async_update_entry(
+                self.entry, data={**self.entry.data, CONF_CALIBRATION: as_dict}
+            )
 
     async def _read_height_hall(self, tries: int = 4) -> int | None:
         for _ in range(tries):
@@ -279,7 +355,10 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
                     )
                 await self._disconnect()
             return ErgostolData(
-                height_cm=self._height_cm, moving=self._moving, available=True
+                height_cm=self._height_cm,
+                moving=self._moving,
+                available=True,
+                error_code=self._error_code,
             )
         async with self._lock:
             await self._ensure_connected()
@@ -287,14 +366,22 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
             if hall is not None:
                 self._height_cm = self._display_cm(hall)
         return ErgostolData(
-            height_cm=self._height_cm, moving=self._moving, available=True
+            height_cm=self._height_cm,
+            moving=self._moving,
+            available=True,
+            error_code=self._error_code,
         )
 
     def _publish(self, hall: int | None, moving: bool) -> None:
         if hall is not None:
             self._height_cm = self._display_cm(hall)
         self.async_set_updated_data(
-            ErgostolData(height_cm=self._height_cm, moving=moving, available=True)
+            ErgostolData(
+                height_cm=self._height_cm,
+                moving=moving,
+                available=True,
+                error_code=self._error_code,
+            )
         )
 
     # ---- actions ----
