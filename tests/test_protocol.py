@@ -4,6 +4,8 @@ from protocol import (
     DEFAULT_BASE,
     DEFAULT_GU,
     DEFAULT_MAX_RUN,
+    OP_HANDSHAKE,
+    OP_HEARTBEAT,
     OP_INIT,
     OP_QUERY,
     P1_ERROR,
@@ -12,6 +14,7 @@ from protocol import (
     crc16,
     derive_calibration,
     error_key,
+    handshake_ack,
     is_calib_step,
     parse,
 )
@@ -79,6 +82,32 @@ def test_is_calib_step_rejects_status_frames() -> None:
     assert not is_calib_step(12)
     assert not is_calib_step(P1_HOT)  # 0x20 "hot state"
     assert not is_calib_step(P1_ERROR)  # 0x80 error push
+
+
+# ---- handset handshake (op-11) ----
+
+
+def test_handshake_ack_advances_stage() -> None:
+    # The vendor app replies op-11 with d = the NEXT stage (its g.C state):
+    # stage 0 -> 1 (handset running), 5 -> 6 (sync values), 9 -> 10 (hot over).
+    assert handshake_ack(0) == 1
+    assert handshake_ack(5) == 6
+    assert handshake_ack(9) == 10
+
+
+def test_handshake_ack_none_for_terminal_or_unknown_stages() -> None:
+    # Stages 2/7/11 complete an exchange (the app breaks before its ACK);
+    # unknown stages must not be answered blindly.
+    for stage in (2, 7, 11, 3, 99):
+        assert handshake_ack(stage) is None
+
+
+def test_build_heartbeat_frame() -> None:
+    assert build(OP_HEARTBEAT)[:4] == bytes([12, 1, 0, 0])
+
+
+def test_build_handshake_ack_frame() -> None:
+    assert build(OP_HANDSHAKE, 1, 0, 1)[:4] == bytes([11, 1, 0, 1])
 
 
 # ---- calibration ----

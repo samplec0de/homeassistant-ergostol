@@ -43,6 +43,8 @@ from .protocol import (
     DEFAULT_MAX_RUN,
     NOTIFY_UUID,
     OP_DOWN,
+    OP_HANDSHAKE,
+    OP_HEARTBEAT,
     OP_INIT,
     OP_MIDDLE,
     OP_QUERY,
@@ -51,11 +53,13 @@ from .protocol import (
     OP_STOP,
     OP_UP,
     P1_ERROR,
+    P1_HOT,
     WRITE_UUID,
     Calibration,
     build,
     derive_calibration,
     error_key,
+    handshake_ack,
     is_calib_step,
     parse,
 )
@@ -101,6 +105,7 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         self._max_run = cached.get("max_run", DEFAULT_MAX_RUN)
         self._calibrated = bool(cached)
         self._error_code = 0
+        self._last_hs: tuple[int, float] | None = None  # (stage, ts) ack dedup
         self._moving = False
         self._height_cm: float | None = None
         self._target_hall: int | None = None  # last commanded target (for snap)
@@ -195,14 +200,31 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
             if is_calib_step(p1):
                 self._calib[p1] = hall
                 self._calib_event.set()
+            elif p1 == P1_HOT:
+                # "hot state" push — the vendor app answers with a heartbeat.
+                _LOGGER.debug(
+                    "Ergostol %s: hot-state push d=%s — answering op-12",
+                    self.address,
+                    hall,
+                )
+                self.hass.async_create_task(self._write(build(OP_HEARTBEAT)))
             else:
-                # E.g. p1=0x20 "hot state" (the vendor app answers op-12).
                 _LOGGER.debug(
                     "Ergostol %s: status frame op=7 p1=0x%02X d=%s",
                     self.address,
                     p1,
                     hall,
                 )
+            return
+        if op == OP_HANDSHAKE:
+            self._handle_handshake(hall)
+            return
+        if op == OP_HEARTBEAT:
+            # p1=1 response to our op-12, p1=2 unsolicited report — the vendor
+            # app sends nothing back for either (Android uses its own timers).
+            _LOGGER.debug(
+                "Ergostol %s: heartbeat frame p1=%s d=%s", self.address, p1, hall
+            )
             return
         if op in (OP_QUERY, OP_STOP):
             self._last_hall = hall
@@ -212,8 +234,6 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
             if not self._moving and self.data is not None:
                 self._publish(hall, moving=False)
             return
-        # E.g. op-11 handset-handshake / op-12 heartbeat (the vendor app ACKs
-        # these, we don't) — log them so we can see if/when the desk asks.
         _LOGGER.debug(
             "Ergostol %s: unhandled frame op=%s p1=%s d=%s",
             self.address,
@@ -221,6 +241,38 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
             p1,
             hall,
         )
+
+    def _handle_handshake(self, stage: int) -> None:
+        # The desk RETRIES an op-11 stage in rapid bursts until answered (seen
+        # live: 8 identical d=0 frames during one handset move). Answer each
+        # stage once per burst — more writes on the fragile handset bus is
+        # exactly what we are trying to avoid.
+        now = time.monotonic()
+        if self._last_hs and self._last_hs[0] == stage and now - self._last_hs[1] < 1.0:
+            return
+        self._last_hs = (stage, now)
+        ack = handshake_ack(stage)
+        if ack is not None:
+            _LOGGER.debug(
+                "Ergostol %s: handshake stage %s — acking with %s",
+                self.address,
+                stage,
+                ack,
+            )
+            self.hass.async_create_task(self._write(build(OP_HANDSHAKE, 1, 0, ack)))
+        elif stage == 2:
+            # "Finished, start to get height" — mirror the app with one op-8 so
+            # the handset-driven height lands immediately.
+            _LOGGER.debug(
+                "Ergostol %s: handshake stage 2 — requesting height", self.address
+            )
+            self.hass.async_create_task(self._write(build(OP_QUERY)))
+        else:
+            _LOGGER.debug(
+                "Ergostol %s: handshake stage %s (no reply expected)",
+                self.address,
+                stage,
+            )
 
     def _set_error(self, code: int) -> None:
         if code == self._error_code:

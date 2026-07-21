@@ -23,6 +23,8 @@ OP_SIT = 5
 OP_INIT = 7
 OP_QUERY = 8
 OP_STOP = 9
+OP_HANDSHAKE = 11  # "handset is running" staged exchange, desk-initiated
+OP_HEARTBEAT = 12  # desk status ping (d=1 response, d=2 unsolicited report)
 
 # Status frames pushed by the desk: the p1 byte doubles as a flag field.
 # p1=0x80 (any op) carries an error code in the data bytes — the code shown on
@@ -50,6 +52,21 @@ def error_key(code: int) -> str:
 def is_calib_step(p1: int) -> bool:
     """True if an op-7 frame with this p1 is an init-walk calibration reply."""
     return 1 <= p1 <= 11
+
+
+# op-11 handshake: the desk opens a staged exchange (stage in d_lo) and RETRIES
+# until the client answers. The vendor app replies op-11 carrying the NEXT
+# stage (its g.C state machine); stages 2/7/11 close an exchange (no reply).
+_HANDSHAKE_ACKS = {
+    0: 1,  # handset running: 0 -> ack 1 -> desk sends 2 ("start to get height")
+    5: 6,  # sync base/min/max: 5 -> ack 6 -> desk sends 7
+    9: 10,  # hot-over: 9 -> ack 10 -> desk sends 11
+}
+
+
+def handshake_ack(stage: int) -> int | None:
+    """d_lo to send back for an op-11 stage, or None if no reply is expected."""
+    return _HANDSHAKE_ACKS.get(stage)
 
 
 # Desk model index (init op-7 param 9 / MCU version) -> hall-per-cm factor (g.u).
