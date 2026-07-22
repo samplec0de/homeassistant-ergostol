@@ -25,9 +25,14 @@ CONF_CALIBRATION = "calibration"
 
 # Coordinator behaviour
 CONNECT_SETTLE_DELAY = 1.0  # seconds after connect before the first write
+CONNECT_MAX_ATTEMPTS = 2  # establish_connection retries per poll cycle
+RECONNECT_COOLDOWN = 60.0  # seconds to wait after a spontaneous link drop
 INIT_STEP_TIMEOUT = 0.5  # seconds to wait for each init-walk reply
 INIT_STEP_RETRIES = 3  # attempts per init-walk step before giving up
-IDLE_POLL_INTERVAL = 5.0  # seconds between height polls while idle
+# Idle polls are a watchdog only: handset moves announce themselves via the
+# op-11 handshake and then stream via the op-8 ping-pong, so the background
+# op-8 rate can stay low — every poll occupies the shared handset bus.
+IDLE_POLL_INTERVAL = 60.0  # seconds between height polls while idle
 # (also reflects handset-driven changes quickly)
 MOVE_TIMEOUT = 60.0  # max seconds for one move
 STOP_LEAD_HALL = 55  # brake this many hall units early (coast comp.)

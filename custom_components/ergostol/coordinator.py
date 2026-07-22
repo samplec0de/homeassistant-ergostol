@@ -26,6 +26,7 @@ from .const import (
     CONF_QUIET_START,
     CONF_SIT_HEIGHT,
     CONF_STAND_HEIGHT,
+    CONNECT_MAX_ATTEMPTS,
     CONNECT_SETTLE_DELAY,
     DEFAULT_SIT_HEIGHT,
     DEFAULT_STAND_HEIGHT,
@@ -34,6 +35,7 @@ from .const import (
     INIT_STEP_RETRIES,
     INIT_STEP_TIMEOUT,
     MOVE_TIMEOUT,
+    RECONNECT_COOLDOWN,
     STOP_LEAD_HALL,
     TOLERANCE_CM,
 )
@@ -106,6 +108,9 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         self._calibrated = bool(cached)
         self._error_code = 0
         self._last_hs: tuple[int, float] | None = None  # (stage, ts) ack dedup
+        self._last_drop: float | None = None  # spontaneous-drop ts (cooldown)
+        self._expected_disconnect = False  # our own disconnect in progress
+        self._requery_pending = False  # handset-move op-8 ping-pong armed
         self._moving = False
         self._height_cm: float | None = None
         self._target_hall: int | None = None  # last commanded target (for snap)
@@ -147,13 +152,27 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
 
     # ---- connection ----
     def _on_disconnect(self, _client) -> None:
-        # INFO on purpose: spontaneous drops are a key E04 diagnostic signal.
-        _LOGGER.info("Ergostol %s: BLE link closed", self.address)
+        if self._expected_disconnect:
+            _LOGGER.debug("Ergostol %s: BLE link closed (expected)", self.address)
+        else:
+            # Spontaneous drop: start the reconnect cooldown. A connect/drop
+            # storm (bleak-retry hammering a flapping link) preceded E04 in
+            # the field logs — never reconnect instantly.
+            self._last_drop = time.monotonic()
+            # INFO on purpose: spontaneous drops are a key E04 diagnostic.
+            _LOGGER.info("Ergostol %s: BLE link closed", self.address)
         self._client = None
 
-    async def _ensure_connected(self) -> None:
+    async def _ensure_connected(self, force: bool = False) -> None:
         if self._client is not None and self._client.is_connected:
             return
+        if not force and self._last_drop is not None:
+            since = time.monotonic() - self._last_drop
+            if since < RECONNECT_COOLDOWN:
+                raise UpdateFailed(
+                    f"Ergostol {self.address}: link dropped {since:.0f}s ago — "
+                    "cooling down before reconnecting"
+                )
         ble_device: BLEDevice | None = bluetooth.async_ble_device_from_address(
             self.hass, self.address, connectable=True
         )
@@ -165,6 +184,7 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
                 ble_device,
                 self.address,
                 self._on_disconnect,
+                max_attempts=CONNECT_MAX_ATTEMPTS,
             )
             _LOGGER.info("Ergostol %s: BLE connected", self.address)
             await self._client.start_notify(NOTIFY_UUID, self._handle_notify)
@@ -227,12 +247,18 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
             )
             return
         if op in (OP_QUERY, OP_STOP):
+            prev = self._last_hall
             self._last_hall = hall
             self._height_event.set()
             # Reflect pushed / handset-driven height changes immediately. During
             # our own moves the move loop already publishes, so skip then.
             if not self._moving and self.data is not None:
                 self._publish(hall, moving=False)
+                # Handset-driven motion: keep the op-8 ping-pong going while
+                # the height keeps changing (the vendor app streams the same
+                # way while "running"), so slow idle polling loses nothing.
+                if prev is not None and abs(hall - prev) > 1:
+                    self.hass.async_create_task(self._requery_soon())
             return
         _LOGGER.debug(
             "Ergostol %s: unhandled frame op=%s p1=%s d=%s",
@@ -439,7 +465,9 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
     # ---- actions ----
     async def async_set_height(self, cm: float) -> None:
         async with self._lock:
-            await self._ensure_connected()
+            # Explicit user action: one deliberate connect is not a storm, so
+            # it may bypass the post-drop cooldown.
+            await self._ensure_connected(force=True)
             await self._move_to(cm)
 
     async def _move_to(self, cm: float) -> None:
@@ -532,7 +560,7 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
         """Recall a stored preset (the desk drives to it and stops itself)."""
         op = PRESET_OPS[which]
         async with self._lock:
-            await self._ensure_connected()
+            await self._ensure_connected(force=True)
             self._abort.clear()
             self._moving = True
             try:
@@ -560,8 +588,23 @@ class ErgostolCoordinator(DataUpdateCoordinator[ErgostolData]):
     async def _disconnect(self) -> None:
         client, self._client = self._client, None
         if client is not None:
+            self._expected_disconnect = True
+            try:
+                with contextlib.suppress(Exception):
+                    await client.disconnect()
+            finally:
+                self._expected_disconnect = False
+
+    async def _requery_soon(self) -> None:
+        if self._requery_pending:
+            return
+        self._requery_pending = True
+        try:
+            await asyncio.sleep(0.4)
             with contextlib.suppress(Exception):
-                await client.disconnect()
+                await self._write(build(OP_QUERY))
+        finally:
+            self._requery_pending = False
 
     async def async_shutdown(self) -> None:
         await super().async_shutdown()
